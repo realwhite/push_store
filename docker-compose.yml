@@ -4,6 +4,10 @@ networks:
   push_store:
     driver: bridge
 
+volumes:
+  grafana-storage: {}
+  database-storage: {}
+
 services:
   database:
     build:
@@ -12,7 +16,7 @@ services:
     environment:
       - POSTGRES_PASSWORD=password
     volumes:
-      - ./data/timescaledb:/var/lib/postgresql/data
+      - database-storage:/var/lib/postgresql/data
     ports: 
       - 5432:5432
     networks:
@@ -21,7 +25,7 @@ services:
   grafana:
     image: grafana/grafana
     volumes:
-      - ./data/grafana:/var/lib/grafana
+      - grafana-storage:/var/lib/grafana
       - ./docker/grafana/provisioning:/etc/grafana/provisioning
     ports: 
       - 3000:3000
