@@ -1,0 +1,15 @@
+# Logging filters
+# loguru:
+#     '': INFO
+#     urllib3: WARNING
+#     asyncio: WARNING
+#     aiohttp: WARNING
+#     runner.manager: WARNING
+  
+# Bind address and port
+http:
+    host: '0.0.0.0'
+    port: 8050
+
+database:
+    dsn: 'postgres://postgres:password@database/push_store'

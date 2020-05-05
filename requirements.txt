@@ -1,0 +1,5 @@
+aiohttp
+asyncpg
+loguru
+PyYAML
+cerberus
