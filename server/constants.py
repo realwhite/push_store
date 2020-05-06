@@ -1,9 +1,9 @@
-
 class MetricStatus:
     ACTIVE = 1
     PAUSED = 2
 
     _ALL = [ACTIVE, PAUSED]
+
 
 class MetricDataType:
     INT = 1
@@ -38,5 +38,3 @@ class MetricDataType:
     @classmethod
     def get_cerberus_type(cls, _type):
         return cls.__CERBERUS_TYPES_MAP.get(_type)
-
-

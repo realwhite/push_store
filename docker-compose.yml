@@ -1,4 +1,4 @@
-version: '3.6'
+version: '2.4'
 
 networks:
   push_store:
@@ -21,6 +21,11 @@ services:
       - 5432:5432
     networks:
       - push_store
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   grafana:
     image: grafana/grafana
@@ -31,12 +36,15 @@ services:
       - 3000:3000
     networks:
       - push_store
+    depends_on:
+      database:
+        condition: service_healthy
 
   web:
     build:
       context: .
       dockerfile: ./docker/Dockerfile
-    command: ["python",  "-m", "server"]
+    command: ["./entrypoint.sh"]
     ports: 
       - 8050:8050
     volumes:
@@ -47,3 +55,6 @@ services:
       - database
     networks:
       - push_store
+    depends_on:
+      database:
+        condition: service_healthy
