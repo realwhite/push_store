@@ -1,14 +1,12 @@
 import sys
-import uuid
 import asyncio
 
-import aiohttp
 from aiohttp import web
 import asyncpg
 from asyncpg.exceptions import UniqueViolationError, CannotConnectNowError
 from loguru import logger
 
-from server.utils import get_uuid, validate, custom_json_dumps
+from server.utils import validate, custom_json_dumps
 from server.schemas import CREATE_METRIC, PUSH_METRIC
 from server.constants import MetricDataType, MetricStatus
 
@@ -39,29 +37,30 @@ class AppHandlers:
     async def create_metric(self, request: web.Request, data: dict) -> web.Response:
         async with self.db_pool.acquire() as conn:
             async with conn.transaction():
-                uuid = get_uuid()
-                metric_tbl_name = f'metric_{uuid}'
+                metric_tbl_name = f"metric_{data['uuid']}"
 
                 try:
                     await conn.execute(
                         'INSERT INTO metrics(uuid, title, datatype, description) VALUES($1, $2, $3, $4);',
-                        uuid, data['title'], data['type'], data['description']
+                        data['uuid'], data['title'], data['type'], data['description']
                     )
                 except UniqueViolationError:
-                    return self.error_response('title_must_be_unique', status=422)
+                    return self.error_response('uuid_must_be_unique', status=422)
 
                 metric_datatype = MetricDataType.get_db_type(data['type'])
-                await conn.execute(f'''    
+
+                await conn.execute(f'''
                     CREATE TABLE {metric_tbl_name} (
-                        time TIMESTAMPTZ NOT NULL,
-                        value {metric_datatype} NULL
+                        time TIMESTAMP NOT NULL DEFAULT now(),
+                        value {metric_datatype} NULL,
+                        tag TEXT NOT NULL DEFAULT ''
                     );
                     SELECT create_hypertable('{metric_tbl_name}', 'time');
                 ''')
 
-                logger.info(f"[METRIC] Metric {data['title']} added.")
+                logger.info(f"[METRIC] Metric '{data['title']}' added.")
 
-        return self.success_response({'metric_id': uuid})
+        return self.success_response({'metric_id': data['uuid']})
 
     async def list_metrics(self, request: web.Request) -> web.Response:
         async with self.db_pool.acquire() as conn:
@@ -73,6 +72,23 @@ class AppHandlers:
     async def update_metric(self, request: web.Request) -> web.Response:
         return self.success_response({})
 
+    async def truncate_metric(self, request: web.Request) -> web.Response:
+        metric_uuid = request.match_info['metric_uuid']
+        async with self.db_pool.acquire() as conn:
+            async with conn.transaction():
+                status = await conn.fetchval('SELECT status FROM metrics WHERE uuid = $1', metric_uuid)
+                if not status:
+                    logger.warning(f'[PUSH] Metric {metric_uuid} not found!')
+                    return self.error_response({'metric_uuid': 'not_found'}, status=404)
+
+                if status == MetricStatus.ACTIVE:
+                    logger.warning(f'[PUSH] Metric {metric_uuid} is active!')
+                    return self.error_response({'status': 'metric must be a paused status'}, status=403)
+
+                await conn.execute(f'TRUNCATE TABLE metric_{metric_uuid}')
+
+        return self.success_response({})
+
     async def delete_metric(self, request: web.Request) -> web.Response:
         metric_uuid = request.match_info['metric_uuid']
         async with self.db_pool.acquire() as conn:
@@ -81,16 +97,14 @@ class AppHandlers:
 
                 if not status:
                     logger.warning(f'[PUSH] Metric {metric_uuid} not found!')
-                    return self.error_response('not_found', status=404)
+                    return self.error_response({'metric_uuid': 'not_found'}, status=404)
 
                 if status == MetricStatus.ACTIVE:
-                    logger.warning(f'[PISH] Metric {metric_uuid} is active!')
-                    return self.error_response('invalid_status', status=403)
+                    logger.warning(f'[PUSH] Metric {metric_uuid} is active!')
+                    return self.error_response({'status': 'metric must be a paused status'}, status=403)
 
-                await conn.execute(f'''
-                    DROP TABLE metric_{metric_uuid};
-                    DELETE FROM metrics WHERE uuid = $1
-                ''', metric_uuid)
+                await conn.execute(f'DROP TABLE metric_{metric_uuid}')
+                await conn.execute('DELETE FROM metrics WHERE uuid = $1', metric_uuid)
 
         return self.success_response({})
 
@@ -109,14 +123,21 @@ class AppHandlers:
                     logger.warning(f'[PISH] Metric {metric_uuid} is not active!')
                     return self.error_response('invalid_status', status=403)
 
-                if 'timestamp' in data:
-                    await conn.execute(f'INSERT INTO metric_{metric_uuid}(time, value) VALUES($1, $2)', data['timestamp'], data['value'])
-                else:
-                    await conn.execute(f'INSERT INTO metric_{metric_uuid}(time, value) VALUES(now(), $1)', data['value'])
+                fields = ['value']
+                if 'time' in data:
+                    fields.append('time')
+                if 'tag' in data:
+                    fields.append('tag')
 
+                fields_str = ', '.join(fields)
+                values_str = ', '.join(f'${i}' for i in range(1, len(fields) + 1))
+
+                query_template = f'INSERT INTO metric_{metric_uuid}({fields_str}) VALUES({values_str})'
+
+                await conn.execute(query_template, *[data[f] for f in fields])
                 await conn.execute(f'UPDATE metrics SET last_event = now() WHERE uuid = $1', metric_uuid)
 
-                logger.debug(f"[PUSH] Value {data['value']} for metric {metric_uuid} pushed.")
+                logger.debug(f"[PUSH] Value {data} for metric {metric_uuid} pushed.")
 
         return self.success_response({'metric_uuid': metric_uuid, 'value': data['value']})
 
@@ -142,8 +163,9 @@ class Application:
             web.post('/metrics', _handlers.create_metric),
             web.get('/metrics', _handlers.list_metrics),
             web.put('/metric/{metric_uuid}', _handlers.update_metric),
-            web.delete('/metric/{metric_uuid}', _handlers.update_metric),
+            web.delete('/metric/{metric_uuid}', _handlers.delete_metric),
             web.post('/metric/{metric_uuid}',  _handlers.push_metric),
+            web.post('/metric/{metric_uuid}/truncate',  _handlers.truncate_metric),
             web.get('/metric/{metric_uuid}',  _handlers.get_metric),
         ])
 
@@ -156,9 +178,8 @@ class Application:
             except (ConnectionRefusedError, CannotConnectNowError) as exc:
                 logger.warning(f'[DATABASE] Connection error {exc}')
                 await asyncio.sleep(5)
-        
-        sys.exit(0)
 
+        sys.exit(0)
 
     def run(self):
         logger.info('[SERVER] Starting application')
@@ -167,4 +188,3 @@ class Application:
             host=self.config['http']['host'],
             port=self.config['http']['port']
         )
-

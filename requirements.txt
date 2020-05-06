@@ -3,3 +3,5 @@ asyncpg
 loguru
 PyYAML
 cerberus
+psycopg2-binary
+yoyo-migrations
