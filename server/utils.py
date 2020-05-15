@@ -18,7 +18,10 @@ def validate(schema):
             if request.method == 'GET':
                 data = request.query
             else:
-                data = await request.json()
+                try:
+                    data = await request.json()
+                except json.decoder.JSONDecodeError:
+                    data = {}
 
             v = Validator(schema)
             is_valid = v.validate(data)

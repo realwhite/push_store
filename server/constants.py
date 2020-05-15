@@ -4,6 +4,13 @@ class MetricStatus:
 
     _ALL = [ACTIVE, PAUSED]
 
+    @classmethod
+    def toggle_status(cls, current_status: int) -> int:
+        if current_status == cls.ACTIVE:
+            return cls.PAUSED
+
+        return cls.ACTIVE
+
 
 class MetricDataType:
     INT = 1

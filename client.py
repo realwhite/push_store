@@ -4,8 +4,8 @@ from loguru import logger
 
 
 class AppMetric:
-    def __init__(self, host, port=8050):
-        self.push_base_url = f'http://{host}:{port}/metric/{{}}'
+    def __init__(self, push_url):
+        self.push_base_url = f'{push_url}/metric/{{}}'
 
     def send_value(self, metric_uuid, value, tag=None, timestamp=None):
         asyncio.ensure_future(self._send(metric_uuid, value))

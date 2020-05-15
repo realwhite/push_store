@@ -25,7 +25,7 @@ class AppHandlers:
     @staticmethod
     def error_response(error: dict, status=422) -> web.Response:
         return web.json_response(
-            {'success': False, 'error': error},
+            {'success': False, 'errors': error},
             status=status, dumps=custom_json_dumps
         )
 
@@ -45,7 +45,7 @@ class AppHandlers:
                         data['uuid'], data['title'], data['type'], data['description']
                     )
                 except UniqueViolationError:
-                    return self.error_response('uuid_must_be_unique', status=422)
+                    return self.error_response({'uuid': ['uuid_must_be_unique']}, status=422)
 
                 metric_datatype = MetricDataType.get_db_type(data['type'])
 
@@ -59,33 +59,57 @@ class AppHandlers:
                 ''')
 
                 logger.info(f"[METRIC] Metric '{data['title']}' added.")
+                metric_data = await conn.fetchrow('''
+                    SELECT title, uuid, status, events_count, extract(epoch from last_event) AS last_event FROM metrics
+                    WHERE uuid = $1
+                ''', data['uuid'])
 
-        return self.success_response({'metric_id': data['uuid']})
+        return self.success_response({'metric': dict(metric_data)})
 
     async def list_metrics(self, request: web.Request) -> web.Response:
         async with self.db_pool.acquire() as conn:
             async with conn.transaction():
-                metrics = await conn.fetch('SELECT * FROM metrics')
+                metrics = await conn.fetch('''
+                    SELECT title, uuid, status, events_count, extract(epoch from last_event) AS last_event
+                    FROM metrics
+                ''')
                 response = [dict(m) for m in metrics]
         return self.success_response({'metrics': response})
 
-    async def update_metric(self, request: web.Request) -> web.Response:
-        return self.success_response({})
+    async def toggle_metric(self, request: web.Request) -> web.Response:
+        metric_uuid = request.match_info['metric_uuid']
+        async with self.db_pool.acquire() as conn:
+            async with conn.transaction():
+                status = await conn.fetchval('SELECT status FROM metrics WHERE uuid = $1 FOR UPDATE', metric_uuid)
+                if not status:
+                    logger.warning(f'[PUSH] Metric {metric_uuid} not found!')
+                    return self.error_response({'metric_uuid': ['not_found']}, status=404)
+
+                target_status = MetricStatus.toggle_status(status)
+
+                await conn.fetchval('UPDATE metrics SET status = $1 WHERE uuid = $2', target_status,  metric_uuid)
+                metric_data = await conn.fetchrow('''
+                    SELECT title, uuid, status, events_count, extract(epoch from last_event) AS last_event FROM metrics
+                    WHERE uuid = $1
+                ''', metric_uuid)
+
+        return self.success_response({'metric': dict(metric_data)})
 
     async def truncate_metric(self, request: web.Request) -> web.Response:
         metric_uuid = request.match_info['metric_uuid']
         async with self.db_pool.acquire() as conn:
             async with conn.transaction():
-                status = await conn.fetchval('SELECT status FROM metrics WHERE uuid = $1', metric_uuid)
+                status = await conn.fetchval('SELECT status FROM metrics WHERE uuid = $1 FOR UPDATE ', metric_uuid)
                 if not status:
                     logger.warning(f'[PUSH] Metric {metric_uuid} not found!')
-                    return self.error_response({'metric_uuid': 'not_found'}, status=404)
+                    return self.error_response({'metric_uuid': ['not_found']}, status=404)
 
                 if status == MetricStatus.ACTIVE:
                     logger.warning(f'[PUSH] Metric {metric_uuid} is active!')
-                    return self.error_response({'status': 'metric must be a paused status'}, status=403)
+                    return self.error_response({'status': ['metric must be a paused status']}, status=403)
 
                 await conn.execute(f'TRUNCATE TABLE metric_{metric_uuid}')
+                await conn.fetchval('UPDATE metrics SET events_count = 0 WHERE uuid = $1', metric_uuid)
 
         return self.success_response({})
 
@@ -97,11 +121,11 @@ class AppHandlers:
 
                 if not status:
                     logger.warning(f'[PUSH] Metric {metric_uuid} not found!')
-                    return self.error_response({'metric_uuid': 'not_found'}, status=404)
+                    return self.error_response({'metric_uuid': ['not_found']}, status=404)
 
                 if status == MetricStatus.ACTIVE:
                     logger.warning(f'[PUSH] Metric {metric_uuid} is active!')
-                    return self.error_response({'status': 'metric must be a paused status'}, status=403)
+                    return self.error_response({'status': ['metric must be a paused status']}, status=403)
 
                 await conn.execute(f'DROP TABLE metric_{metric_uuid}')
                 await conn.execute('DELETE FROM metrics WHERE uuid = $1', metric_uuid)
@@ -113,15 +137,15 @@ class AppHandlers:
         metric_uuid = request.match_info['metric_uuid']
         async with self.db_pool.acquire() as conn:
             async with conn.transaction():
-                status = await conn.fetchval('SELECT status FROM metrics WHERE uuid = $1', metric_uuid)
+                status = await conn.fetchval('SELECT status FROM metrics WHERE uuid = $1 FOR UPDATE ', metric_uuid)
 
                 if not status:
                     logger.warning(f'[PUSH] Metric {metric_uuid} not found!')
-                    return self.error_response('not_found', status=404)
+                    return self.error_response({'metric_uuid': ['not_found']}, status=404)
 
                 if status != MetricStatus.ACTIVE:
                     logger.warning(f'[PISH] Metric {metric_uuid} is not active!')
-                    return self.error_response('invalid_status', status=403)
+                    return self.error_response({'status': ['metric must be an active status']}, status=403)
 
                 fields = ['value']
                 if 'time' in data:
@@ -135,7 +159,10 @@ class AppHandlers:
                 query_template = f'INSERT INTO metric_{metric_uuid}({fields_str}) VALUES({values_str})'
 
                 await conn.execute(query_template, *[data[f] for f in fields])
-                await conn.execute(f'UPDATE metrics SET last_event = now() WHERE uuid = $1', metric_uuid)
+                await conn.execute(
+                    'UPDATE metrics SET last_event = now(), events_count = events_count + 1 WHERE uuid = $1',
+                    metric_uuid
+                )
 
                 logger.debug(f"[PUSH] Value {data} for metric {metric_uuid} pushed.")
 
@@ -151,23 +178,45 @@ class AppHandlers:
 class Application:
     def __init__(self, config: dict):
         self.config = config
-        self.webapp = web.Application()
+        self.webapp = None
         self.loop = asyncio.get_event_loop()
-        self._config_webapp()
+        self.webapp = self._config_webapp()
 
         self.loop.run_until_complete(self._config_database())
 
     def _config_webapp(self):
-        _handlers = AppHandlers(self.webapp)
-        self.webapp.add_routes([
+
+        @web.middleware
+        async def cors_middleware(request, handler):
+            if request.method == 'OPTIONS':
+                response = web.Response(headers={
+                    'Access-Control-Allow-Methods': 'GET, PUT, POST, DELETE, HEAD'
+                })
+            else:
+                response = await handler(request)
+
+            response.headers['Access-Control-Allow-Origin'] = '*'
+            return response
+
+        webapp = web.Application(middlewares=[cors_middleware])
+        _handlers = AppHandlers(webapp)
+        webapp.add_routes([
             web.post('/metrics', _handlers.create_metric),
             web.get('/metrics', _handlers.list_metrics),
-            web.put('/metric/{metric_uuid}', _handlers.update_metric),
+            web.post('/metric/{metric_uuid}/toggle', _handlers.toggle_metric),
             web.delete('/metric/{metric_uuid}', _handlers.delete_metric),
             web.post('/metric/{metric_uuid}',  _handlers.push_metric),
             web.post('/metric/{metric_uuid}/truncate',  _handlers.truncate_metric),
             web.get('/metric/{metric_uuid}',  _handlers.get_metric),
         ])
+
+        if self.config['webui']['enabled']:
+            webapp.add_routes([
+                web.get('/', lambda r: web.HTTPFound('/ui/index.html')),
+                web.static('/ui', self.config['webui']['static_path'], show_index=True)
+            ])
+
+        return webapp
 
     async def _config_database(self):
         for _ in range(10):
