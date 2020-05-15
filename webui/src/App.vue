@@ -83,9 +83,7 @@
       },
       api_fetch: function(endpoint, options) {
         return new Promise((resolve, reject) =>  {
-          // fetch( window.location.protocol+ '://'+ window.location.host +'/'+ endpoint, options)
-          // options.headers = {'Content-Type': 'application/json;charset=utf-8'}
-          fetch( 'http://localhost:8050/'+ endpoint, options)
+          fetch( window.location.protocol+ '://'+ window.location.host +'/'+ endpoint, options)
           .then(response => response.json())
           .then(data => {
             if (!data.success){

@@ -16,5 +16,4 @@ webui:
     static_path: 'webui/dist'
 
 database:
-    # dsn: 'postgres://postgres:password@database/push_store'
-    dsn: 'postgres://postgres:password@127.0.0.1/push_store'
+    dsn: 'postgres://postgres:password@database/push_store'
