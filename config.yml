@@ -12,7 +12,7 @@ http:
     port: 8050
 
 webui:
-    enabled: False
+    enabled: True
     static_path: 'webui/dist'
 
 database:
