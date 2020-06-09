@@ -83,7 +83,7 @@
       },
       api_fetch: function(endpoint, options) {
         return new Promise((resolve, reject) =>  {
-          fetch( window.location.protocol+ '://'+ window.location.host +'/'+ endpoint, options)
+          fetch( window.location.protocol+ '//'+ window.location.host +'/'+ endpoint, options)
           .then(response => response.json())
           .then(data => {
             if (!data.success){
